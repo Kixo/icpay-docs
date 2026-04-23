@@ -281,6 +281,12 @@ export const navigation: Array<NavGroup> = [
     ],
   },
   {
+    title: 'Stripe (Credit card payments)',
+    links: [
+      { title: 'Stripe Connect & payouts', href: '/stripe' },
+    ],
+  },
+  {
     title: 'Tokens',
     links: [
       { title: 'Tokens', href: '/ledgers' },

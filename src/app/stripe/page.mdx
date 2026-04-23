@@ -1,0 +1,101 @@
+export const metadata = {
+  title: 'Stripe (Connect & payouts)',
+  description:
+    'Use Stripe for USD card payments, Connect Express onboarding, internal balances, payouts to connected accounts, and refunds.',
+}
+
+# Stripe (Connect & payouts)
+
+ICPay can treat **Stripe** as a payment rail for **USD card payments** (typically the `stripe_usd` ledger in your environment). Money is collected on your **platform** Stripe account; merchants link their own account with **Stripe Connect** so you can move their share to them with **Connect transfers** (exposed in the product as **Stripe payouts**). {{ className: 'lead' }}
+
+This page describes how that flow works in the dashboard, what you must configure, and how balances relate to **payouts** and **refunds**.
+
+## Prerequisites
+
+- A **Stripe** account with **API keys** configured for your deployment (platform secret key is used server-side by **icpay-services** for Stripe API calls).
+- **Stripe Connect** enabled for your platform (Express accounts are used for merchant onboarding).
+- In ICPay, a **Stripe-type chain** and **`stripe_usd`** (or equivalent) ledger must exist so payments and payouts can be tagged as Stripe fiat.
+
+Exact environment variable names depend on your deployment; your operator documentation should list where keys are injected for **icpay-api** and **icpay-services**.
+
+## Stripe Connect and onboarding
+
+**Stripe Connect** lets each ICPay merchant attach a **connected account** (`acct_…`). ICPay uses **Express**-style onboarding: the merchant completes Stripe’s hosted flow (business details, bank information, etc.) and Stripe tracks whether payouts to that account are allowed.
+
+### Where to onboard
+
+In the **icpay-web** dashboard, open **Settings** and use the Stripe Connect section:
+
+- **Connect Stripe account** — starts onboarding when no account is linked yet.
+- **Edit connected account** — shown when a Stripe connected account id is already stored (including **incomplete** onboarding). Use this to return to Stripe and finish or update details.
+- **Disconnect** — clears the linked Connect account on the ICPay side so you can connect a different Stripe account. This does not delete the account in Stripe; it only removes the association in ICPay.
+
+### Onboarding UX
+
+- Onboarding opens in a **new browser tab** so you do not lose your place in the dashboard.
+- **Return** and **refresh** URLs point back to **Settings** (with query flags such as `?stripe=return` and `?stripe=refresh`) so Stripe redirects land on the correct page after onboarding.
+
+### Country selection
+
+You choose a **country** when starting Connect onboarding. Stripe treats the connected account’s country as fixed once the account exists; if you change country before onboarding is fully submitted, the platform may create a **new** connected account for the new country. Pick the correct country before completing onboarding.
+
+### After onboarding
+
+Stripe may still show requirements until **charges** and **payouts** are fully enabled for that connected account. You need a valid **`acct_…`** destination before ICPay can execute a **Stripe payout** (Connect transfer) to that merchant.
+
+## Fiat payments with Stripe
+
+For supported checkouts, the customer pays with a **card** (or other Stripe payment methods you enable in Stripe). ICPay records a **payment** and **transaction** linked to Stripe identifiers (for example **PaymentIntent** id). Funds settle on your **platform** Stripe balance first; accounting inside ICPay tracks what belongs to the **merchant account** versus the platform according to your product rules.
+
+Completed Stripe-tagged payments trigger **balance refresh** logic so internal Stripe balances stay aligned with activity.
+
+## Balances: platform vs merchant account
+
+Two different notions of “balance” matter:
+
+1. **Platform Stripe balance (Stripe API)**  
+   What actually sits on your **platform** Stripe account. For **Connect transfers** and many **refunds**, Stripe only spends the **`available`** portion of that balance. Card charges often appear as **`pending`** first, then become **`available`** after Stripe’s settlement timing (shorter in test mode for some flows, longer in live mode).
+
+2. **Merchant “Stripe USD” internal balance (ICPay)**  
+   For each merchant account, ICPay maintains an internal **Stripe settlement** view derived from the database: completed Stripe inflows **minus** refunds and payouts that are not in **failed** or **cancelled** state. That number drives whether the merchant is allowed to request a **payout** of a given size so you do not over-allocate relative to recorded activity.
+
+Before creating a **Stripe payout** or **Stripe refund**, ICPay refreshes the **platform** balance from Stripe and enforces that the platform has enough **`available`** funds for the operation, and that the **merchant internal** Stripe balance is sufficient for the requested amount.
+
+## Payouts to your connected account
+
+**Stripe payouts** in ICPay mean: create a **payout** record against the **Stripe** / **`stripe_usd`** ledger, then execute a **Stripe Connect transfer** from your **platform** balance to the merchant’s **connected account** (`acct_…`) stored from onboarding.
+
+### Requirements
+
+- **Connected account**: The merchant must complete Connect onboarding far enough that ICPay has a destination **`acct_…`**. The **New payout** screen in the dashboard warns and links to **Settings** if Stripe is selected but Connect is not set up.
+- **Sufficient platform `available` balance**: The transfer will fail at Stripe if you only have **pending** funds. Your internal checks use **available** so the product behavior matches Stripe.
+- **Sufficient merchant internal Stripe balance**: The requested payout amount must not exceed the DB-derived net for that account.
+
+### Lifecycle
+
+1. User creates a payout (amount, Stripe USD ledger) in the dashboard.
+2. ICPay validates balances, persists the payout (for example **pending**), and triggers execution via **icpay-services** (chain-agnostic payout sync for the Stripe chain).
+3. **icpay-services** calls Stripe to create a **transfer** to the connected account. On success, the payout is marked **completed** and balances are refreshed. On failure, the payout is marked **failed** and the error message is surfaced (for example insufficient available funds).
+
+Payouts that are not **failed** or **cancelled** reduce the merchant’s internal Stripe settlement balance; failures restore the effective balance via the same formula on refresh.
+
+## Refunds
+
+For eligible **completed** Stripe (fiat) payments, authorized users can request a **refund** from the payment detail view. ICPay creates a **refund** record and **icpay-services** performs a **Stripe refund** against the original **PaymentIntent** (or charge), using the platform secret key.
+
+After a successful Stripe refund, the **refund** record completes and the **payment** status moves to **refunded** so the UI and list views stay consistent. Refunds also respect **platform** and **merchant** Stripe balance checks before creation.
+
+## Testing in Stripe test mode
+
+Use **Stripe test mode** keys. Test card numbers behave differently:
+
+- Many cards leave funds in **`pending`** on the platform balance first, so **Connect transfers** can fail with “insufficient **available** funds” even though the Dashboard shows successful charges.
+- Stripe documents a test card (**`4000000000000077`**) that adds funds directly to **`available`** balance so you can test **payouts / transfers** without waiting. See Stripe’s documentation: [Testing – available balance](https://stripe.com/docs/testing#available-balance).
+
+This matches production: **succeeded** charges are not the same as funds being **available** for transfers.
+
+## Webhooks and reconciliation
+
+ICPay updates payment and refund state when **icpay-services** completes the Stripe API flow (workers / internal sync). For extra resilience (for example refunds created in the **Stripe Dashboard**, network retries, or delayed Stripe state), you can additionally configure **Stripe webhooks** toward your own listener and reconcile—but the core product path does not require you to expose a Stripe webhook endpoint to ICPay for the standard dashboard refund and payout flows.
+
+For **ICPay** application webhooks (payment completed, refunded, etc.), see [Webhooks](/webhooks).

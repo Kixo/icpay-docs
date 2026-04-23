@@ -7,6 +7,7 @@ export const sections = [
   { title: 'Usage', id: 'usage' },
   { title: 'Configuration', id: 'configuration' },
   { title: 'Events', id: 'events' },
+  { title: 'X402 up-to (pay button)', id: 'x402-upto' },
 ]
 
 # Progress Bar
@@ -86,10 +87,11 @@ export class AppComponent implements AfterViewInit {
 
 ## Configuration
 
-- `progressBar.enabled?: boolean` default true
+- `progressBar.enabled?: boolean` — default `true` on widgets that embed the bar.
 
 Tip: Style preferences can be combined with `theme` (e.g., `primaryColor`) on each widget. Other widgets can link here to centralize progress bar options.
 
+On **`icpay-pay-button`**, the bar also receives **`x402UptoSkipSettlementWait`** from the same config object (Lit property on **`icpay-progress-bar`**). You do not set it on the progress element directly when using the pay button.
 
 ## Events
 
@@ -97,6 +99,7 @@ The progress bar listens to SDK events and reflects state automatically:
 
 - `icpay-sdk-transaction-created`, `-updated`, `-completed`, `-failed`
 - `icpay-sdk-transaction-mismatched` — treated as error; shows message “Amount mismatch. Requested X, paid Y.”
+- `icpay-sdk-method-start` / `icpay-sdk-method-success` — e.g. `createPaymentX402Usd` is mapped to up-to step labels when `args.request.x402Upto` (or `x402Scheme: 'upto'`) is set.
 
 Example custom listener:
 
@@ -106,4 +109,14 @@ window.addEventListener('icpay-sdk-transaction-mismatched', (e: any) => {
   console.warn('Payment amount mismatch', { requestedAmount, paidAmount })
 })
 ```
+
+## X402 up-to (pay button)
+
+When the pay button runs **X402 up-to** (`x402Upto: true`), the progress component uses dedicated step titles (wallet → sign → submit authorization → settlement) instead of the generic crypto labels.
+
+- **`icpay-x402-upto-submitted`** (window `CustomEvent`, `bubbles: true`, `composed: true`) — fired by the pay button **after** EVM **up-to confirm** succeeds. `detail`: `{ paymentIntentId: string, amountUsdMax: number }` (cap in USD). The progress bar uses this to either advance to “settlement loading” (default poll path) or show the **early authorization** banner + **pending last step** when **`x402UptoSkipSettlementWait`** is `true`.
+
+- **`icpay-sdk-transaction-completed`** — when polling until `completed`, success copy prefers **`paymentIntent.amountUsd`** from the event payload so the settled fiat amount (e.g. after merchant settlement) can differ from the configured max cap.
+
+Details and examples: **[Agentic X402 up-to payments](/agentic-x402#progress-skip)**. For **server-side sync** when the header is saved, subscribe to the **`x402_upto_authorization_received`** webhook — **[Webhooks](/webhooks#event-x402-upto-authorization-received)**.
 

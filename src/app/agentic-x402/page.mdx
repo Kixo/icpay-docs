@@ -9,6 +9,8 @@ export const sections = [
   { title: 'Flow overview', id: 'flow' },
   { title: 'Using icpay-sdk only', id: 'sdk-only' },
   { title: 'Using icpay-widget', id: 'widget' },
+  { title: 'Progress UI & optional skip settlement wait', id: 'progress-skip' },
+  { title: 'Webhook: x402_upto_authorization_received', id: 'webhook-x402-upto-authorization' },
   { title: 'Config reference (SDK & widget)', id: 'config-reference' },
 ]
 
@@ -41,7 +43,8 @@ End-to-end flow:
 3. **User signs X402 v2 authorization**:
    - EVM: EIP-712 typed data (EIP‑3009) for `maxAmountRequired`.
    - ICPay’s backend verifies the authorization.
-4. **Your service starts work** once the authorization is valid.
+3b. **EVM up-to confirm (sync point):** the widget or your app calls **`POST /sdk/public/payments/intents/x402/upto/confirm`** (publishable key). ICPay persists the signed header and emits the **`x402_upto_authorization_received`** webhook — **subscribe to this** so your server stays in lockstep with the client (especially when using **`x402UptoSkipSettlementWait`** and not polling for `completed` in the browser). Details: [Webhook: x402_upto_authorization_received](#webhook-x402-upto-authorization).
+4. **Your service starts work** once the authorization is valid (ideally after you receive the webhook or your own callback from `onX402UptoIntent`).
 5. **Service finishes and computes `settledAmount`** (in smallest unit), satisfying:
    - `0 < settledAmount <= maxAmountRequired`.
 6. **Backend settles**:
@@ -207,19 +210,127 @@ Under the hood:
 
 - Widget calls `createPaymentX402Usd({ x402Upto: true, ... })`.
 - SDK performs X402 authorization but **does not** call the public settle endpoint for up-to.
+- For **EVM** up-to, the widget persists the signed header via `POST /sdk/public/payments/intents/x402/upto/confirm` (publishable key), then continues (see [Progress UI & optional skip settlement wait](#progress-skip)).
 - Widget calls `onX402UptoIntent` with:
   - `paymentIntentId`
   - `amountUsd` (cap)
   - `metadata`
   - `accepts[]` (X402 requirements)
-- Widget then polls the intent via `GET /sdk/public/payments/intents/:id` until it is terminal:
-  - When your backend calls `protected.settleX402Upto` and ICPay marks the intent `completed`, the widget:
-    - Updates its UI.
-    - Calls `onSuccess` for the host.
+  - `paymentHeader`, `paymentRequirements` when present (EVM)
+- **By default**, the widget polls the intent via `GET /sdk/public/payments/intents/:id` until it is terminal:
+  - When your backend calls `protected.settleX402Upto` and ICPay marks the intent `completed`, the widget updates UI, emits `icpay-sdk-transaction-completed`, and calls `onSuccess`.
+- **If** `x402UptoSkipSettlementWait: true`, the widget **does not** poll after confirm; see the section below.
+- **In parallel**, when up-to **confirm** succeeds, ICPay emits the **`x402_upto_authorization_received`** webhook so your server can sync (not only the browser callback). See [Webhook: x402_upto_authorization_received](#webhook-x402-upto-authorization).
 
 ### 2. Backend: same `settleX402Upto` call
 
 Your backend implementation is identical to the SDK-only case: it receives `paymentIntentId` from `onX402UptoIntent` and later calls `protected.settleX402Upto` with the computed `settledAmount`.
+
+## Progress UI & optional skip settlement wait
+
+When **`progressBar.enabled`** is not `false` (default on), **`icpay-pay-button`** drives **`icpay-progress-bar`** with step labels tailored to X402 **up-to** (similar in spirit to the Stripe checkout steps):
+
+1. **Wallet ready** — wallet connected for the flow.  
+2. **Sign authorization** — user signs the X402 v2 header (EIP‑712 / cap).  
+3. **Submit authorization** — EVM: signed header is sent to ICPay via **up-to confirm**; progress advances when the SDK returns and confirm succeeds.  
+4. **Settlement** — waiting for merchant **secret-key** settlement and on-chain finalization.
+
+### Default: wait for settlement (poll)
+
+With **`x402UptoSkipSettlementWait` omitted or `false`**:
+
+- After confirm, the progress bar moves **Settlement** to **loading** and the widget **polls** the public payment intent until status is terminal (`completed`, failed, etc.).
+- When the intent completes, **`icpay-sdk-transaction-completed`** fires (window + SDK). The progress bar shows **Payment Complete!** and uses **`paymentIntent.amountUsd`** from the API when present so the success line reflects the **settled** fiat amount (e.g. \$0.05 charged) rather than only the widget’s **max** cap (e.g. \$0.10). ICPay enriches `amountUsd` on the intent DTO after settlement metadata exists.
+
+### Optional: skip long poll (`x402UptoSkipSettlementWait: true`)
+
+On-chain settlement can take **minutes to hours**. If you do not want the user to wait on a spinner until the intent is `completed`:
+
+- Set **`x402UptoSkipSettlementWait: true`** on the pay button config (with **`x402Upto: true`**).
+- After **up-to confirm** succeeds, the widget:
+  - Dispatches a **`CustomEvent`** on `window`: **`icpay-x402-upto-submitted`** with `detail: { paymentIntentId, amountUsdMax }` (the cap in USD).
+  - Sets the pay button to **succeeded** (if you use `disableAfterSuccess`, the button can show “Paid”) and calls **`onSuccess`** with `{ id: 0, status: 'authorized_pending_settlement', paymentIntentId }` — use this to acknowledge “authorization stored” while settlement is still pending.
+  - The progress UI shows a **green banner** (“You’re done on your side…”) and keeps the **last step** (**Settlement**) in a **pending** state with dashed styling so it is obvious settlement is not finished yet. The user can **Close** the modal.
+- **`icpay-sdk-transaction-completed`** is **not** emitted from the widget for this path until something else completes the payment (there is no poll). Fulfillment when the intent eventually completes should rely on **webhooks** (especially **`payment.completed`**), **server polling**, or the user returning to a status page. For the moment the header is stored, rely on **`x402_upto_authorization_received`** — see [Webhook: x402_upto_authorization_received](#webhook-x402-upto-authorization) and the [Webhooks](/webhooks#event-x402-upto-authorization-received) reference.
+
+Example combining **up-to**, **skip wait**, and **`onX402UptoIntent`**:
+
+```tsx {{ title: 'React: up-to + skip settlement wait + progress' }}
+'use client'
+import { IcpayPayButton, IcpaySuccess } from '@ic-pay/icpay-widget/react'
+
+export default function AgentPay() {
+  const config = {
+    publishableKey: process.env.NEXT_PUBLIC_ICPAY_PK!,
+    amountUsd: 10, // max cap shown to user
+    x402Upto: true,
+    x402UptoSkipSettlementWait: true,
+    progressBar: { enabled: true },
+    metadata: { jobId: 'agent-42' },
+    onX402UptoIntent: async ({
+      paymentIntentId,
+      amountUsd,
+      paymentHeader,
+      paymentRequirements,
+      accepts,
+    }) => {
+      await fetch('/api/jobs/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentIntentId,
+          maxUsd: amountUsd,
+          paymentHeader,
+          paymentRequirements,
+          accepts,
+        }),
+      })
+    },
+  }
+
+  return (
+    <IcpayPayButton
+      config={config}
+      onSuccess={(d: IcpaySuccess) => {
+        if (d.status === 'authorized_pending_settlement') {
+          console.log('Authorization saved; settle later', d.paymentIntentId)
+        } else {
+          console.log('Payment completed', d)
+        }
+      }}
+    />
+  )
+}
+```
+
+For integrators building custom UI, you can listen for the same milestone:
+
+```ts
+window.addEventListener('icpay-x402-upto-submitted', (e: Event) => {
+  const { paymentIntentId, amountUsdMax } = (e as CustomEvent).detail || {}
+  // Optional: show your own “submitted, pending settlement” state
+})
+```
+
+The internal **`<icpay-progress-bar>`** receives **`.x402UptoSkipSettlementWait`** from the pay button config so it can branch between “poll until completed” and “banner + pending last step”.
+
+## Webhook: `x402_upto_authorization_received`
+
+ICPay delivers a dedicated webhook when an **X402 up-to** authorization has been **saved on the payment intent** after successful **up-to confirm** (EVM, publishable key).
+
+| | |
+|--|--|
+| **Event `type`** | `x402_upto_authorization_received` |
+| **When** | Immediately after **`POST /sdk/public/payments/intents/x402/upto/confirm`** succeeds and the intent (metadata / header storage) is updated. |
+| **Not** | On-chain settlement — that comes later via **`protected.settleX402Upto`** and is reflected in **`payment.completed`** (and related payment events). |
+
+**Why this is the key sync mechanism**
+
+- The browser may fire **`icpay-x402-upto-submitted`** for your SPA, but **your backend** should not rely only on the client. The webhook is the **authoritative server notification** that ICPay has the signed header and intent id, so you can safely enqueue work, tie `paymentIntentId` to a user session, or wait for settlement in a worker.
+- With **`x402UptoSkipSettlementWait: true`**, the widget **does not poll** until `completed`, so **`payment.completed` may arrive much later**. Handling **`x402_upto_authorization_received`** lets you transition internal state to “authorized, pending settlement” in parallel with the widget’s “authorization saved” UI.
+- Combine with **`onX402UptoIntent`** for defense in depth: callback when the tab has confirmed; webhook when ICPay has persisted.
+
+Subscribe in **icpay.org → Settings → Webhook Endpoints** (same HMAC verification as other events). Full payload field list: **[Webhooks → x402_upto_authorization_received](/webhooks#event-x402-upto-authorization-received)**.
 
 ## Config reference (SDK & widget)
 
@@ -262,21 +373,36 @@ Requires:
 
 ### Widget: pay button config
 
-New fields on `PayButtonConfig`:
+Relevant fields on `PayButtonConfig`:
 
 ```ts
 export type PayButtonConfig = CommonConfig & {
   amountUsd?: number;
   buttonLabel?: string;
-  onSuccess?: (tx: { id: number; status: string }) => void;
+  onSuccess?: (tx: {
+    id: number;
+    status: string;
+    paymentIntentId?: string;
+    paymentIntent?: Record<string, unknown>;
+  }) => void;
 
-  // X402 up-to support
+  /** Use X402 `upto` scheme (capped authorization; settle later with secret key). */
   x402Upto?: boolean;
+  /** Optional explicit scheme; defaults from `x402Upto`. */
+  x402Scheme?: 'exact' | 'upto';
+  /**
+   * When true with `x402Upto` (EVM): after up-to confirm, do not poll until `completed`.
+   * Progress shows “authorization saved” + pending settlement step; `onSuccess` with
+   * `status: 'authorized_pending_settlement'`. See [Progress UI & optional skip settlement wait](#progress-skip).
+   */
+  x402UptoSkipSettlementWait?: boolean;
   onX402UptoIntent?: (info: {
     paymentIntentId: string;
     amountUsd: number;
     metadata?: Record<string, any>;
     accepts: any[];
+    paymentHeader?: string;
+    paymentRequirements?: any;
   }) => void | Promise<void>;
 };
 ```
@@ -285,8 +411,8 @@ Behavior:
 
 - When `x402Upto` is `true` and the selected token supports X402:
   - Widget initiates X402 up-to intent and authorization via SDK.
-  - Calls `onX402UptoIntent` when the intent + acceptances are ready.
-  - Polls the intent until status becomes terminal, then fires `onSuccess` (and emits global SDK events).
+  - After EVM **confirm**, runs `onX402UptoIntent`, then either **polls** until terminal or **stops** if `x402UptoSkipSettlementWait` is `true` (see above).
+  - On full completion (poll path or other flows), fires `onSuccess` / `icpay-sdk-transaction-completed` with enriched intent when applicable.
 
-This combination—`x402Upto` + `onX402UptoIntent` + `protected.settleX402Upto`—is the recommended pattern for **agentic, usage-based X402 payments** in ICPay.
+This combination—`x402Upto` + optional `x402UptoSkipSettlementWait` + `onX402UptoIntent` + `protected.settleX402Upto`—is the recommended pattern for **agentic, usage-based X402 payments** in ICPay.
 

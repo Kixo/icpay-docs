@@ -10,6 +10,7 @@ export const sections = [
   { title: 'Event types', id: 'event-types' },
   { title: 'Payload format', id: 'payload-format' },
   { title: 'payment_intent.created', id: 'event-payment-intent-created' },
+  { title: 'x402_upto_authorization_received', id: 'event-x402-upto-authorization-received' },
   { title: 'payment.created', id: 'event-payment-created' },
   { title: 'payment.updated', id: 'event-payment-updated' },
   { title: 'payment.completed', id: 'event-payment-completed' },
@@ -53,6 +54,7 @@ Only the following event types are currently emitted. Subscribe to these in your
 | `payment.failed` | A payment has failed. |
 | `payment.cancelled` | A payment was cancelled. |
 | `payment.refunded` | A payment was refunded. |
+| `x402_upto_authorization_received` | **X402 up-to (EVM):** the client called **`POST /sdk/public/payments/intents/x402/upto/confirm`** and ICPay persisted the signed payment header on the intent. Use this to **sync your backend** with the wallet authorization *before* secret-key settlement and `payment.completed`. See [Agentic X402](/agentic-x402#webhook-x402-upto-authorization). |
 
 ## Payload format
 
@@ -76,7 +78,7 @@ Every delivery uses this envelope. The `data.object` and optional `data.previous
 ```
 
 - **id**: Unique event id (e.g. `evt_...`). Use for idempotency.
-- **type**: One of the event types above.
+- **type**: One of the event types in the table above (e.g. `payment.completed`, `x402_upto_authorization_received`).
 - **data.object**: The resource (payment intent or payment); see each event section below.
 - **data.previous_attributes**: Present for `payment.updated` (and similar) when relevant; contains the previous values of changed fields.
 
@@ -117,6 +119,47 @@ Sections below describe the **data.object** (and where applicable **data.previou
 | intentCode | number | Intent code (always a number in webhook payloads). |
 | metadata | object | Key-value metadata from the intent. |
 | createdAt | string | ISO 8601 timestamp. |
+
+## x402_upto_authorization_received
+
+**Triggered when:** A publishable-key client successfully confirms an **X402 up-to** authorization for **EVM** — i.e. after **`POST /sdk/public/payments/intents/x402/upto/confirm`** persists the signed X402 header on the payment intent (and updates metadata such as `icpay_x402_upto_max_amount_atomic`). **No on-chain settlement has run yet**; that still happens when you call **`POST /sdk/payments/x402/upto/settle`** with the secret key (or via `icpay.protected.settleX402Upto`).
+
+**Why it matters:** This is the **server-side hook** that lines up with the widget’s **`icpay-x402-upto-submitted`** window event and with **`x402UptoSkipSettlementWait`** flows where the browser does not poll until `completed`. Subscribe in **Settings → Webhook Endpoints** so your backend can start metered work, mark a job as “authorized”, or store `paymentIntentId` idempotently **before** `payment.completed`.
+
+**data.object** (payment intent snapshot — not the same as every `payment_intent.created` field set; aligns with confirm response context):
+
+```json
+{
+  "id": "pi_...",
+  "object": "payment_intent",
+  "paymentIntentId": "pi_...",
+  "status": "requires_payment",
+  "amount": "100000",
+  "amountUsd": 0.1,
+  "ledgerCanisterId": "…",
+  "payer": "0x…",
+  "metadata": {
+    "orderId": "job-123",
+    "icpay_x402_upto_max_amount_atomic": "100000"
+  },
+  "intentCode": 123456
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | string | Payment intent id (same as `paymentIntentId`). |
+| object | string | Always `payment_intent` for this event. |
+| paymentIntentId | string | Intent id — correlate with `onX402UptoIntent` / client callbacks. |
+| status | string | Intent status after confirm (often still `requires_payment` or `processing` until settlement). |
+| amount | string | Intent amount in smallest token unit (authorization context). |
+| amountUsd | number \| null | Fiat display hint when present on the intent. |
+| ledgerCanisterId | string \| null | Token ledger reference. |
+| payer | string \| null | EVM payer address when verified from the header. |
+| metadata | object | Intent metadata including up-to confirm hints. |
+| intentCode | number \| null | Intent code for matching on-chain / internal flows. |
+
+**Typical sequence with up-to:** `payment_intent.created` (optional) → **`x402_upto_authorization_received`** → later `payment.created` / `payment.updated` as settlement progresses → **`payment.completed`** when funds are finalized.
 
 ## payment.created
 
@@ -253,6 +296,7 @@ app.post('/webhooks/icpay', express.raw({ type: 'application/json' }), (req, res
   const event = JSON.parse(req.body.toString('utf8'))
   switch (event.type) {
     case 'payment_intent.created': /* e.g. log or prepare order */ break
+    case 'x402_upto_authorization_received': /* sync: header saved; start job / await settle */ break
     case 'payment.completed': /* fulfill order */ break
     case 'payment.failed': /* notify user */ break
     case 'payment.refunded': /* update records */ break

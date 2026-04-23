@@ -6,6 +6,7 @@ export const metadata = {
 export const sections = [
   { title: 'Usage', id: 'usage' },
   { title: 'Configuration', id: 'configuration' },
+  { title: 'X402 up-to (agentic)', id: 'x402-upto' },
   // onramp: { title: 'Onramp (Transak)', id: 'onramp' },
 ]
 
@@ -116,6 +117,17 @@ export class AppComponent implements AfterViewInit {
 - `buttonLabel?: string` (used if `amountUsd` not set)
 - `progressBar?: { enabled?: boolean }`
 - Common options: `tokenShortcodes?: string[]`, `chainShortcodes?: string[]`, `chainTypes?: Array<'ic' | 'evm' | 'sol'>`, `theme?`, `useOwnWallet?`, `plugNPlay?`, `debug?`, `disablePaymentButton?`, `disableAfterSuccess?`
+
+## X402 up-to (agentic)
+
+For **usage-based / capped** X402 payments (`scheme: 'upto'`), set **`x402Upto: true`**. The widget uses `createPaymentX402Usd`, persists the EVM header via **up-to confirm**, then either **polls** the intent until `completed` or, with **`x402UptoSkipSettlementWait: true`**, stops after confirm and treats the flow as “authorization saved” while settlement may finish later.
+
+- **`x402Upto?: boolean`** — enable up-to intent and signing flow.
+- **`x402Scheme?: 'exact' | 'upto'`** — optional explicit scheme (usually inferred from `x402Upto`).
+- **`x402UptoSkipSettlementWait?: boolean`** — when `true` with up-to (EVM): no long poll; `onSuccess` may receive `status: 'authorized_pending_settlement'`; progress shows a banner + pending settlement step. See [Agentic X402 up-to payments](/agentic-x402#progress-skip).
+- **`onX402UptoIntent?: (info) => void | Promise<void>`** — called after confirm with `paymentIntentId`, cap `amountUsd`, `accepts`, `paymentHeader`, `paymentRequirements`, `metadata` — use to notify your backend to start work / store the header.
+
+Full flow, progress behavior, webhook **`x402_upto_authorization_received`**, and code examples: **[Agentic X402 up-to payments](/agentic-x402)** and **[Webhooks](/webhooks#event-x402-upto-authorization-received)**.
 
 {/* onramp-start */}
 ## Onramp (Transak)
