@@ -232,6 +232,8 @@ X402 v2 supports **“up-to” payments** where the wallet signs a **maximum** a
 - **Authorization:** The wallet still signs an authorization for `maxAmountRequired` (cap).
 - **Settlement:** The business backend later calls a **secret-key endpoint** with the final amount in USD (`settledAmountUsd`); icpay-api converts to token units and must satisfy `0 < settledAmount <= maxAmountRequired`.
 - **On-chain (EVM):** `PaymentProcessor` **v1.3.0+** exposes `payWithSignatureUpto`: one EIP-3009 pull for the **signed max**, splits/platform fee are computed on the **settled** amount, and the **unused cap** is refunded to the payer in the same transaction. Upgrade deployed PaymentProcessor implementations before relying on up-to settlement in production.
+- **Widget UX:** `icpay-pay-button` with **`x402Upto: true`** drives tailored progress steps and, after EVM **up-to confirm**, either polls the intent until `completed` or, with **`x402UptoSkipSettlementWait: true`**, lets the user dismiss while settlement may still be pending. See **[Agentic X402 up-to payments](/agentic-x402#progress-skip)** for behavior, **`icpay-x402-upto-submitted`**, and success amounts from **`paymentIntent.amountUsd`**.
+- **Webhooks:** when the client calls **`POST /sdk/public/payments/intents/x402/upto/confirm`**, ICPay emits **`x402_upto_authorization_received`** so your backend can sync **before** `payment.completed`. Essential for skip-poll flows. See **[Webhooks](/webhooks#event-x402-upto-authorization-received)** and **[Agentic X402 → Webhook](/agentic-x402#webhook-x402-upto-authorization)**.
 
 ### New endpoints and flags
 

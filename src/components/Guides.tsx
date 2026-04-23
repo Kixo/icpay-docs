@@ -27,6 +27,12 @@ const guides = [
     name: 'Webhooks',
     description: 'Configure webhooks to receive real-time payment notifications.',
   },
+  {
+    href: '/stripe',
+    name: 'Stripe Connect & payouts',
+    description:
+      'Stripe card payments, Connect onboarding, internal balances, and payouts to connected accounts.',
+  },
 ]
 
 export function Guides() {
