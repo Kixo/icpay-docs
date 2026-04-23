@@ -230,7 +230,8 @@ X402 v2 supports **“up-to” payments** where the wallet signs a **maximum** a
 
 - **Intent flag:** ICPay marks these as `x402_upto = true` on the payment intent.
 - **Authorization:** The wallet still signs an authorization for `maxAmountRequired` (cap).
-- **Settlement:** The business backend later calls a **secret-key endpoint** with the final `settledAmount` (must satisfy `0 < settledAmount <= maxAmountRequired`).
+- **Settlement:** The business backend later calls a **secret-key endpoint** with the final amount in USD (`settledAmountUsd`); icpay-api converts to token units and must satisfy `0 < settledAmount <= maxAmountRequired`.
+- **On-chain (EVM):** `PaymentProcessor` **v1.3.0+** exposes `payWithSignatureUpto`: one EIP-3009 pull for the **signed max**, splits/platform fee are computed on the **settled** amount, and the **unused cap** is refunded to the payer in the same transaction. Upgrade deployed PaymentProcessor implementations before relying on up-to settlement in production.
 
 ### New endpoints and flags
 
@@ -252,23 +253,17 @@ X402 v2 supports **“up-to” payments** where the wallet signs a **maximum** a
 - **Secret-key settle for up-to (backend only)**
   - URL (icpay-api, secret key): `POST /sdk/payments/x402/upto/settle`
     - Guarded by `SecretKeyAuthGuard`, requires `secretKey` and `x-account-id`.
-    - Body:
-      ```json
-      {
-        "paymentIntentId": "pi_123",
-        "settledAmount": "900000" // in token smallest unit
-      }
-      ```
+    - Body: `paymentIntentId`, `settledAmountUsd` (USD), optional `paymentHeader` (base64) if not already stored on the intent.
     - Constraints:
       - Intent must belong to the authenticated account.
       - Intent must have `x402_upto = true`.
-      - `0 < settledAmount <= maxAmountRequired`.
-    - Calls internal services to perform on-chain settlement and records `settledAmount` on the intent.
+      - Converted token `settledAmount` must satisfy `0 < settledAmount <= maxAmountRequired` (signed cap).
+    - Calls icpay-services to invoke **`payWithSignatureUpto`** on `PaymentProcessor` (pull max, finalize on settled amount, refund excess).
 
 - **icpay-services internal settlement (called by icpay-api)**
   - URL: `POST /evm/settlement/x402-upto`
   - Auth: internal API key between icpay-api and icpay-services (Bearer).
-  - Role: enforce `settledAmount <= maxAmountRequired` and perform EVM settlement via the existing X402 authorization path.
+  - Role: enforce cap, load stored X402 header (authorization + signature), call **`payWithSignatureUpto`** on-chain, then persist the settled amount on the intent.
 
 ### Use case: metered AI API or long-running job
 
